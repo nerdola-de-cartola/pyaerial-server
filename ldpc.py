@@ -182,11 +182,6 @@ def ldpc_stack(esno_db, num_prb, num_layers):
         code_rates=[code_rate]
     )
 
-    tb_error = not np.array_equal(decoded_tb[0], transport_block)
-    print(tb_error)
-
-    print(decoded_tb[0][0:12])
-    print(transport_block[0:12])
     num_correct_bits = np.sum(decoded_tb[0] == transport_block)
 
     num_error_bits = np.sum(decoded_tb[0] != transport_block)
