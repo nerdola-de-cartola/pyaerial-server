@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from ldpc import func
+from ldpc import ldpc_stack
 from time import time
 
 app = FastAPI()
@@ -9,16 +9,16 @@ class LdpcParams(BaseModel):
     esno_db: float # = 8.4
     num_prb: int # = 100
     num_layers: int # = 4
-    num_slots: int # = 10
 
 @app.post("/ldpc/")
 async def ldpc(params: LdpcParams):
     start = time()
-    errors, *_ = func(params.esno_db, params.num_prb, params.num_layers, params.num_slots)
+    ber, accuracy, *_ = ldpc_stack(params.esno_db, params.num_prb, params.num_layers)
     execution_time = (time() - start) * 1000
 
     return {
-        "num_tb_errors": errors,
+        "ber": ber,
+        "accuracy": accuracy,
         "time (ms)": execution_time
     }
 

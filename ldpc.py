@@ -34,7 +34,7 @@ np_config.enable_numpy_behavior()
 # Simulation parameters.
 #esno_db_range = np.arange(8.1, 8.4, 0.1)
 #num_slots = 100
-min_num_tb_errors = 50
+#min_num_tb_errors = 50
 
 # Numerology and frame structure (TS 38.211)
 #num_prb = 100              # Number of allocated PRBs (affects TB size and rate-matching)
@@ -83,7 +83,7 @@ ldpc_derate_match = LdpcDeRateMatch(enable_scrambling=enable_scrambling, cuda_st
 crc_checker = CrcChecker(cuda_stream=cuda_stream)
 
 
-mcs = 20
+mcs = 9
 
 # Derive modulation order and code rate
 mod_order, code_rate = get_mcs(mcs)
@@ -97,104 +97,105 @@ channel = sionna.phy.channel.AWGN()
 
 
 # ## Main simulation loop
-def func(esno_db, num_prb, num_layers, num_slots):
-    num_tb_errors = 0
+def ldpc_stack(esno_db, num_prb, num_layers):                
 
-    if num_slots <= 0:
-        return 0, 0
+    # Generate a random transport block (in bits).
+    transport_block = random_tb(
+        mod_order=mod_order,
+        code_rate=code_rate * 1024,
+        dmrs_syms=dmrs_sym,
+        num_prbs=num_prb,
+        start_sym=start_sym,
+        num_symbols=num_symbols,
+        num_layers=num_layers,
+        return_bits=False
+    )
+    tb_size = transport_block.shape[0] * 8
+    
+    # Run transport block CRC encoding, code block segmentation and code block CRC encoding.
+    code_blocks = crc_encoder.encode(
+        tb_inputs=[transport_block],
+        tb_sizes=[tb_size],
+        code_rates=[code_rate]
+    )
+    
+    # Run the LDPC encoding. The LDPC encoder takes a K x C array as its input, where K is the number of bits per code
+    # block and C is the number of code blocks. Its output is N x C where N is the number of coded bits per code block.
+    # If there is more than one code block, a code block CRC (random in this case as we do not need an actual CRC) is
+    # attached to 
+    coded_bits = ldpc_encoder.encode(
+        code_blocks=code_blocks,
+        tb_sizes=[tb_size],
+        code_rates=[code_rate],
+        redundancy_versions=[rv]
+    )
 
-    # Run multiple slots and compute BLER.
-    for slot_idx in range(num_slots):
-        slot_number = slot_idx % num_slots_per_frame
-                
-        # Generate a random transport block (in bits).
-        transport_block = random_tb(
-            mod_order=mod_order,
-            code_rate=code_rate * 1024,
-            dmrs_syms=dmrs_sym,
-            num_prbs=num_prb,
-            start_sym=start_sym,
-            num_symbols=num_symbols,
-            num_layers=num_layers,
-            return_bits=False
-        )
-        tb_size = transport_block.shape[0] * 8
-       
-        # Run transport block CRC encoding, code block segmentation and code block CRC encoding.
-        code_blocks = crc_encoder.encode(
-            tb_inputs=[transport_block],
-            tb_sizes=[tb_size],
-            code_rates=[code_rate]
-        )
-        
-        # Run the LDPC encoding. The LDPC encoder takes a K x C array as its input, where K is the number of bits per code
-        # block and C is the number of code blocks. Its output is N x C where N is the number of coded bits per code block.
-        # If there is more than one code block, a code block CRC (random in this case as we do not need an actual CRC) is
-        # attached to 
-        coded_bits = ldpc_encoder.encode(
-            code_blocks=code_blocks,
-            tb_sizes=[tb_size],
-            code_rates=[code_rate],
-            redundancy_versions=[rv]
-        )
+    # Run rate matching. This needs rate matching length as its input, meaning the number of bits that can be
+    # transmitted within the allocated resource elements. The input data is fed as 32-bit floats.        
+    num_data_sym = (np.array(dmrs_sym[start_sym:start_sym + num_symbols]) == 0).sum()
+    rate_match_len = num_data_sym * num_prb * 12 * num_layers * mod_order
+    rate_matched_bits = ldpc_rate_match.rate_match(
+        coded_blocks=coded_bits,
+        tb_sizes=[tb_size],
+        code_rates=[code_rate],
+        rate_match_lens=[rate_match_len],
+        mod_orders=[mod_order],
+        num_layers=[num_layers],
+        redundancy_versions=[rv],
+        cinits=[cinit]
+    )[0]
 
-        # Run rate matching. This needs rate matching length as its input, meaning the number of bits that can be
-        # transmitted within the allocated resource elements. The input data is fed as 32-bit floats.        
-        num_data_sym = (np.array(dmrs_sym[start_sym:start_sym + num_symbols]) == 0).sum()
-        rate_match_len = num_data_sym * num_prb * 12 * num_layers * mod_order
-        rate_matched_bits = ldpc_rate_match.rate_match(
-            coded_blocks=coded_bits,
-            tb_sizes=[tb_size],
-            code_rates=[code_rate],
-            rate_match_lens=[rate_match_len],
-            mod_orders=[mod_order],
-            num_layers=[num_layers],
-            redundancy_versions=[rv],
-            cinits=[cinit]
-        )[0]
+    # Map the bits to symbols and transmit through an AWGN channel. All this in Sionna.       
+    no = sionna.phy.utils.ebnodb2no(esno_db, num_bits_per_symbol=1, coderate=1)
+    tx_symbols = mapper(rate_matched_bits[None])        
+    rx_symbols = channel(tx_symbols, no)
+    llr = -1. * demapper(rx_symbols, no)[0, :].numpy()[:, None]
+    
+    # Run receiver side (de)rate matching. The input is the received array of bits directly, and the output
+    # is a NumPy array of size N x C of log likelihood ratios, represented as 32-bit floats. Descrambling
+    # is also performed here in case scrambling is enabled.
+    derate_matched_bits = ldpc_derate_match.derate_match(
+        input_llrs=[llr],
+        tb_sizes=[tb_size],
+        code_rates=[code_rate],
+        rate_match_lengths=[rate_match_len],
+        mod_orders=[mod_order],
+        num_layers=[num_layers],
+        redundancy_versions=[rv],
+        ndis=[1],
+        cinits=[cinit]
+    )
 
-        # Map the bits to symbols and transmit through an AWGN channel. All this in Sionna.       
-        no = sionna.phy.utils.ebnodb2no(esno_db, num_bits_per_symbol=1, coderate=1)
-        tx_symbols = mapper(rate_matched_bits[None])        
-        rx_symbols = channel(tx_symbols, no)
-        llr = -1. * demapper(rx_symbols, no)[0, :].numpy()[:, None]
-       
-        # Run receiver side (de)rate matching. The input is the received array of bits directly, and the output
-        # is a NumPy array of size N x C of log likelihood ratios, represented as 32-bit floats. Descrambling
-        # is also performed here in case scrambling is enabled.
-        derate_matched_bits = ldpc_derate_match.derate_match(
-            input_llrs=[llr],
-            tb_sizes=[tb_size],
-            code_rates=[code_rate],
-            rate_match_lengths=[rate_match_len],
-            mod_orders=[mod_order],
-            num_layers=[num_layers],
-            redundancy_versions=[rv],
-            ndis=[1],
-            cinits=[cinit]
-        )
+    # Run LDPC decoding. The decoder takes the derate matching output as its input and returns
+    decoded_bits = ldpc_decoder.decode(
+        input_llrs=derate_matched_bits,
+        tb_sizes=[tb_size],
+        code_rates=[code_rate],
+        redundancy_versions=[rv],
+        rate_match_lengths=[rate_match_len]
+    )
 
-        # Run LDPC decoding. The decoder takes the derate matching output as its input and returns
-        decoded_bits = ldpc_decoder.decode(
-            input_llrs=derate_matched_bits,
-            tb_sizes=[tb_size],
-            code_rates=[code_rate],
-            redundancy_versions=[rv],
-            rate_match_lengths=[rate_match_len]
-        )
+    # Combine code blocks into a transport block. CRC ignored as it was just random bits in this example.
+    decoded_tb, _ = crc_checker.check_crc(
+        input_bits=decoded_bits,
+        tb_sizes=[tb_size],
+        code_rates=[code_rate]
+    )
 
-        # Combine code blocks into a transport block. CRC ignored as it was just random bits in this example.
-        decoded_tb, _ = crc_checker.check_crc(
-            input_bits=decoded_bits,
-            tb_sizes=[tb_size],
-            code_rates=[code_rate]
-        )
+    tb_error = not np.array_equal(decoded_tb[0], transport_block)
+    print(tb_error)
 
-        tb_error = not np.array_equal(decoded_tb[0], transport_block)
-        num_tb_errors += tb_error
+    print(decoded_tb[0][0:12])
+    print(transport_block[0:12])
+    num_correct_bits = np.sum(decoded_tb[0] == transport_block)
 
-        if num_tb_errors >= min_num_tb_errors:
-            break  # Next Es/No value.
+    num_error_bits = np.sum(decoded_tb[0] != transport_block)
 
-    return num_tb_errors, decoded_bits, derate_matched_bits, rate_matched_bits, coded_bits, code_blocks, transport_block
+    total_bits = transport_block.size
+
+    ber = num_error_bits / total_bits
+
+    accuracy = num_correct_bits / total_bits
+
+    return ber, accuracy, decoded_bits, derate_matched_bits, rate_matched_bits, coded_bits, code_blocks, transport_block
 
