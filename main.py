@@ -31,5 +31,6 @@ if __name__ == "__main__":
         "main:app",  # filename:variable
         host="0.0.0.0",
         port=8080,
+        workers=8,
         reload=True
     )
