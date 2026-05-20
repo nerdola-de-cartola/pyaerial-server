@@ -83,7 +83,7 @@ ldpc_derate_match = LdpcDeRateMatch(enable_scrambling=enable_scrambling, cuda_st
 crc_checker = CrcChecker(cuda_stream=cuda_stream)
 
 
-mcs = 20
+mcs = 9
 
 # Derive modulation order and code rate
 mod_order, code_rate = get_mcs(mcs)
